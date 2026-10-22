@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schnitzeljagd</title>
+<style>
+:root{--bg:#fff8e7;--fg:#2b2118;--card:#fff;--acc:#d9480f;--ok:#2b8a3e;--bad:#c92a2a;--line:#e8d9b5}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1712;--fg:#f3e9d6;--card:#2a231b;--acc:#ff922b;--ok:#69db7c;--bad:#ff8787;--line:#4a3f30}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:18px/1.45 system-ui,sans-serif}
+main{max-width:560px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:1.5rem;margin:0 0 4px}
+.sub{opacity:.7;margin:0 0 18px}
+.card{background:var(--card);border:2px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px}
+.person{display:inline-block;background:var(--acc);color:#fff;font-weight:700;border-radius:999px;padding:4px 14px;margin-bottom:10px}
+.raetsel{white-space:pre-wrap;font-size:1.25rem;font-weight:600}
+input{width:100%;font:inherit;padding:14px;border-radius:12px;border:2px solid var(--line);background:var(--bg);color:var(--fg);margin:12px 0 8px}
+button{font:inherit;font-weight:700;border:0;border-radius:12px;padding:14px 18px;background:var(--acc);color:#fff;width:100%}
+button.leise{background:transparent;color:var(--fg);border:2px solid var(--line);margin-top:10px}
+.fehler{color:var(--bad);font-weight:700;min-height:1.4em}
+.hinweis{color:var(--ok);font-weight:700;font-size:1.2rem;white-space:pre-wrap}
+.wort{display:flex;gap:6px;justify-content:center;margin-top:8px}
+.wort span{width:2.2rem;height:2.6rem;display:grid;place-items:center;border-bottom:3px solid var(--acc);font-weight:800;font-size:1.4rem}
+small{opacity:.7}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script src="daten.js"></script>
+<script>
+const J = window.JAGD, app = document.getElementById('app');
+const tok = new URLSearchParams(location.search).get('s');
+const idx = J.stationen.findIndex(s => s.token === tok);
+
+const normal = t => t.toLowerCase().replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss').replace(/[^a-z0-9]/g,'');
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const esc = t => t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const lade = () => { try { return JSON.parse(localStorage.getItem('jagd-buchstaben') || '{}'); } catch { return {}; } };
+const speichere = o => { try { localStorage.setItem('jagd-buchstaben', JSON.stringify(o)); } catch {} };
+
+async function entschluessele(st, antwort) {
+  const roh = await crypto.subtle.importKey('raw', new TextEncoder().encode(normal(antwort)), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt:unb64(st.salt), iterations:J.iter, hash:'SHA-256'},
+    roh, {name:'AES-GCM', length:256}, false, ['decrypt']);
+  const klar = await crypto.subtle.decrypt({name:'AES-GCM', iv:unb64(st.iv)}, key, unb64(st.ct));
+  return JSON.parse(new TextDecoder().decode(klar));
+}
+
+let clip = null;
+// Spielt den vorab erzeugten Clip; fehlt er, springt die Browserstimme ein.
+function spiele(datei, ersatzText) {
+  if (clip) clip.pause();
+  clip = new Audio(datei);
+  clip.onerror = () => sprich(ersatzText);
+  clip.play().catch(() => {});
+}
+
+function sprich(text) {
+  if (!('speechSynthesis' in window) || !text) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'de-DE'; u.rate = 0.95;
+  const v = speechSynthesis.getVoices().find(v => v.lang && v.lang.startsWith('de'));
+  if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+
+function wortAnzeige() {
+  const b = lade();
+  return '<div class="wort">' + J.stationen.map((_, i) => `<span>${b[i] ? esc(b[i]) : ''}</span>`).join('') + '</div>';
+}
+
+function startseite() {
+  app.innerHTML = `<h1>${esc(J.titel)}</h1><p class="sub">Schnitzeljagd</p>
+  <div class="card">${esc(J.einleitung)}<p><small>Scannt den ersten QR-Code, um zu starten.</small></p></div>`;
+}
+
+function station(st, i) {
+  const gesprochen = st.sprech || ((st.person ? st.person + ', ' : '') + st.raetsel);
+  app.innerHTML = `<h1>${esc(J.titel)}</h1><p class="sub">${esc(st.name)} · ${i+1} von ${J.stationen.length}</p>
+  <div class="card">
+    ${st.person ? `<div class="person">${esc(st.person)}, jetzt du!</div><br>` : ''}
+    <div class="raetsel">${esc(st.raetsel)}</div>
+    <button class="leise" id="vor">🔊 Vorlesen</button>
+  </div>
+  <div class="card" id="antwortkarte">
+    <label for="a"><b>Eure Antwort</b></label>
+    <input id="a" autocomplete="off" autocapitalize="off" enterkeyhint="go">
+    <div class="fehler" id="f"></div>
+    <button id="go">Prüfen</button>
+  </div>
+  <div class="card"><b>Lösungswort</b><br><small>${esc(J.wortHinweis)}</small>${wortAnzeige()}</div>`;
+  const frage = () => spiele(`audio/frage-${i+1}.mp3`, gesprochen);
+  document.getElementById('vor').onclick = frage;
+  // Browser erlauben Sprache oft erst nach einer Berührung – deshalb beim ersten Tippen automatisch.
+  const einmal = () => { frage(); window.removeEventListener('pointerdown', einmal); };
+  window.addEventListener('pointerdown', einmal, {once:true});
+  frage();
+  const pruefen = async () => {
+    const antwort = document.getElementById('a').value;
+    if (!normal(antwort)) return;
+    try {
+      const r = await entschluessele(st, antwort);
+      const b = lade(); b[i] = r.buchstabe; speichere(b);
+      document.getElementById('antwortkarte').innerHTML =
+        `<div class="hinweis">✔ ${esc(r.hinweis)}</div><p>Ihr bekommt den Buchstaben <b style="font-size:1.6rem">${esc(r.buchstabe)}</b></p>${wortAnzeige()}`;
+      spiele(`audio/antwort-${i+1}.mp3`, r.hinweis);
+    } catch {
+      document.getElementById('f').textContent = 'Leider falsch – versucht es nochmal!';
+    }
+  };
+  document.getElementById('go').onclick = pruefen;
+  document.getElementById('a').addEventListener('keydown', e => { if (e.key === 'Enter') pruefen(); });
+}
+
+if (idx < 0) startseite(); else station(J.stationen[idx], idx);
+if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => {};
+</script>
+</body>
+</html>
